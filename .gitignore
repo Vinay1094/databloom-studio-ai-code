@@ -216,3 +216,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# ========================================
+# Databloom Studio AI Specific
+# ========================================
+# Generated video exports
+exports/
+backend/exports/
+# Session data
+*.mp4
+*.wav
+*.jpg
+*.png
+backend/**/*.mp4
+backend/**/*.wav
+backend/**/*.jpg
+backend/**/*.png
+backend/**/*.srt
+# Environment
+.env
+# IDE
+.idea/
+# Logs
+*.log
