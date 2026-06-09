@@ -7,341 +7,331 @@ import os
 import json
 import subprocess
 import time
+import logging
+import textwrap
 from typing import Dict, List, Any
+from pathlib import Path
 
-# Output directory
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# ── Output directory ──────────────────────────────────────────────────────────
 EXPORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "exports")
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
+# ── Optional dependency guards ────────────────────────────────────────────────
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    logger.warning("Pillow not installed. Image generation will be skipped.")
 
-def generate_video(
-    script_data: Dict[str, Any],
-    voice: str = "Male",
-    video_format: str = "Portrait (9:16)",
+try:
+    from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    GTTS_AVAILABLE = False
+    logger.warning("gTTS not installed. Audio generation will be skipped.")
+
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    logger.warning("Whisper not installed. Subtitle generation will be skipped.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image Generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_scene_image(
+    scene: Dict[str, Any],
+    scene_index: int,
+    session_id: str,
+    width: int = 1280,
+    height: int = 720,
 ) -> str:
     """
-    Main video generation pipeline.
-    Orchestrates all steps from scenes to final MP4.
-    
-    Args:
-        script_data: Script dictionary with scenes
-        voice: Voice type for TTS
-        video_format: Portrait or Landscape
-    
-    Returns:
-        Path to the generated video file
+    Generate a styled slide image for a scene using Pillow.
+    Returns the path to the saved PNG file.
     """
-    scenes = script_data.get("scenes", [])
-    if not scenes:
-        raise ValueError("No scenes found in script data")
-    
-    session_id = str(int(time.time()))
-    session_dir = os.path.join(EXPORTS_DIR, f"session_{session_id}")
-    os.makedirs(session_dir, exist_ok=True)
-    
-    # Step 1: Generate images for each scene
-    image_paths = generate_images(scenes, session_dir)
-    
-    # Step 2: Generate audio for each scene
-    audio_paths = generate_audio(scenes, session_dir, voice)
-    
-    # Step 3: Generate subtitles
-    subtitle_path = generate_subtitles(scenes, session_dir)
-    
-    # Step 4: Assemble video with FFmpeg
-    output_file = os.path.join(session_dir, "final_output.mp4")
-    assemble_video(
-        image_paths, audio_paths, subtitle_path, output_file, video_format
-    )
-    
-    return output_file
+    if not PIL_AVAILABLE:
+        raise RuntimeError("Pillow is required for image generation. Install it with: pip install pillow")
 
+    title = scene.get("title", f"Scene {scene_index + 1}")
+    narration = scene.get("narration", "")
+    visual_style = scene.get("visual_style", "default")
 
-def generate_images(scenes: List[Dict], session_dir: str) -> List[str]:
-    """
-    Generate images for each scene using Stable Diffusion / Flux.
-    
-    Currently a stub - integrates with SD WebUI API in production.
-    """
-    image_paths = []
-    for i, scene in enumerate(scenes):
-        filename = os.path.join(session_dir, f"scene_{i+1}.jpg")
-        visual_prompt = scene.get("visual_prompt", "Abstract background")
-        
-        # TODO: Call Stable Diffusion API
-        # sd_api_call(visual_prompt, filename)
-        
-        # For now, create a placeholder
-        image_paths.append(create_placeholder_image(filename, visual_prompt))
-    
-    return image_paths
+    # Color themes per visual style
+    themes = {
+        "intro":      {"bg": (15, 23, 42),   "accent": (99, 102, 241),  "text": (255, 255, 255)},
+        "explanation":{"bg": (17, 24, 39),   "accent": (16, 185, 129),  "text": (243, 244, 246)},
+        "highlight":  {"bg": (30, 27, 75),   "accent": (245, 158, 11),  "text": (255, 255, 255)},
+        "conclusion": {"bg": (7, 36, 55),    "accent": (14, 165, 233),  "text": (226, 232, 240)},
+        "default":    {"bg": (10, 10, 30),   "accent": (139, 92, 246),  "text": (255, 255, 255)},
+    }
 
+    theme = themes.get(visual_style, themes["default"])
+    bg_color    = theme["bg"]
+    accent_color = theme["accent"]
+    text_color  = theme["text"]
 
-def create_placeholder_image(filename: str, prompt: str) -> str:
-    """
-    Creates a placeholder image with text overlay using FFmpeg.
-    Used when SD is not available.
-    """
-    # Escape special characters for FFmpeg
-    safe_prompt = prompt.replace("'", "").replace("\"", "").replace(":", "")
-    safe_prompt = safe_prompt[:50]
-    
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", f"color=c=blue:s=1080x1920",
-        "-vf",
-        f"drawtext=text='{safe_prompt[:30]}...':fontsize=40:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2",
-        "-t", "3",
-        filename
-    ]
-    
+    img = Image.new("RGB", (width, height), color=bg_color)
+    draw = ImageDraw.Draw(img)
+
+    # Accent bar (top)
+    draw.rectangle([0, 0, width, 8], fill=accent_color)
+    # Accent bar (bottom)
+    draw.rectangle([0, height - 8, width, height], fill=accent_color)
+
+    # Subtle grid pattern
+    for x in range(0, width, 60):
+        draw.line([(x, 0), (x, height)], fill=(255, 255, 255, 10), width=1)
+    for y in range(0, height, 60):
+        draw.line([(0, y), (width, y)], fill=(255, 255, 255, 10), width=1)
+
+    # Load fonts (fallback to default if custom fonts not found)
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return filename
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        # FFmpeg not available, return empty path
-        return ""
+        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
+        font_body  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
+        font_badge = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except Exception:
+        font_title = ImageFont.load_default()
+        font_body  = font_title
+        font_badge = font_title
+
+    # Scene badge
+    badge_text = f"SCENE {scene_index + 1}"
+    draw.rounded_rectangle([50, 40, 200, 80], radius=12, fill=accent_color)
+    draw.text((60, 50), badge_text, fill=(255, 255, 255), font=font_badge)
+
+    # Title
+    title_y = 120
+    draw.text((60, title_y), title, fill=text_color, font=font_title)
+
+    # Divider
+    draw.rectangle([60, title_y + 70, 400, title_y + 74], fill=accent_color)
+
+    # Narration (word-wrapped)
+    wrapped = textwrap.wrap(narration, width=70)
+    body_y = title_y + 100
+    for line in wrapped[:6]:   # max 6 lines
+        draw.text((60, body_y), line, fill=text_color, font=font_body)
+        body_y += 42
+
+    # Watermark
+    draw.text((width - 260, height - 50), "Databloom Studio AI", fill=accent_color, font=font_badge)
+
+    # Save
+    img_dir = os.path.join(EXPORTS_DIR, session_id, "images")
+    os.makedirs(img_dir, exist_ok=True)
+    img_path = os.path.join(img_dir, f"scene_{scene_index:03d}.png")
+    img.save(img_path, "PNG")
+    logger.info(f"[Image] Saved: {img_path}")
+    return img_path
 
 
-def generate_audio(
-    scenes: List[Dict], session_dir: str, voice: str = "Male"
-) -> List[str]:
+# ─────────────────────────────────────────────────────────────────────────────
+# Audio Generation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_scene_audio(
+    narration: str,
+    scene_index: int,
+    session_id: str,
+    voice: str = "Male",
+    language: str = "en",
+) -> str:
     """
-    Generate TTS audio for each scene using Coqui TTS / Piper.
-    
-    Currently a stub - integrates with TTS engine in production.
+    Generate TTS audio for a scene using gTTS.
+    Returns the path to the saved MP3 file.
     """
-    audio_paths = []
-    for i, scene in enumerate(scenes):
-        filename = os.path.join(session_dir, f"scene_{i+1}.wav")
-        text = scene.get("text", "No text available")
-        duration = scene.get("duration", 5)
-        
-        # TODO: Call Coqui TTS or Piper
-        # tts_api_call(text, filename, voice)
-        
-        # For now, create a placeholder audio
-        audio_paths.append(create_placeholder_audio(filename, duration))
-    
-    return audio_paths
+    if not GTTS_AVAILABLE:
+        raise RuntimeError("gTTS is required for audio generation. Install it with: pip install gtts")
+
+    audio_dir = os.path.join(EXPORTS_DIR, session_id, "audio")
+    os.makedirs(audio_dir, exist_ok=True)
+    audio_path = os.path.join(audio_dir, f"scene_{scene_index:03d}.mp3")
+
+    tts = gTTS(text=narration, lang=language, slow=False)
+    tts.save(audio_path)
+    logger.info(f"[Audio] Saved: {audio_path}")
+    return audio_path
 
 
-def create_placeholder_audio(filename: str, duration: int) -> str:
-    """
-    Creates a placeholder audio file with FFmpeg.
-    Used when TTS engine is not available.
-    """
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi",
-        "-i", f"sine=frequency=1000:duration={duration}",
-        filename
-    ]
-    
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return filename
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return ""
+# ─────────────────────────────────────────────────────────────────────────────
+# Subtitle Generation (Whisper)
+# ─────────────────────────────────────────────────────────────────────────────
 
+def generate_subtitles(audio_path: str, scene_index: int, session_id: str) -> str:
+    """
+    Transcribe audio using OpenAI Whisper and produce an SRT subtitle file.
+    Returns the path to the SRT file.
+    """
+    subtitle_dir = os.path.join(EXPORTS_DIR, session_id, "subtitles")
+    os.makedirs(subtitle_dir, exist_ok=True)
+    srt_path = os.path.join(subtitle_dir, f"scene_{scene_index:03d}.srt")
 
-def generate_subtitles(scenes: List[Dict], session_dir: str) -> str:
-    """
-    Generate SRT subtitle file from scenes.
-    Can be enhanced with Whisper for transcribed subtitles.
-    """
-    srt_path = os.path.join(session_dir, "subtitles.srt")
-    
-    start_time = 0
+    if not WHISPER_AVAILABLE:
+        logger.warning("[Subtitles] Whisper not available. Writing empty SRT.")
+        with open(srt_path, "w") as f:
+            f.write("")
+        return srt_path
+
+    model = whisper.load_model("base")
+    result = model.transcribe(audio_path)
+
     with open(srt_path, "w", encoding="utf-8") as f:
-        for i, scene in enumerate(scenes):
-            text = scene.get("text", "")
-            duration = scene.get("duration", 5)
-            end_time = start_time + duration
-            
-            f.write(f"{i+1}\n")
-            f.write(f"{format_time(start_time)} --> {format_time(end_time)}\n")
-            f.write(f"{text}\n\n")
-            start_time = end_time
-    
+        for i, seg in enumerate(result.get("segments", []), start=1):
+            start = _format_srt_time(seg["start"])
+            end   = _format_srt_time(seg["end"])
+            text  = seg["text"].strip()
+            f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+
+    logger.info(f"[Subtitles] Saved: {srt_path}")
     return srt_path
 
 
-def format_time(seconds: float) -> str:
-    """
-    Format time in SRT format: HH:MM:SS,mmm
-    """
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+def _format_srt_time(seconds: float) -> str:
+    h  = int(seconds // 3600)
+    m  = int((seconds % 3600) // 60)
+    s  = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
-def assemble_video(
-    image_paths: List[str],
-    audio_paths: List[str],
-    subtitle_path: str,
-    output_file: str,
-    video_format: str = "Portrait (9:16)",
-) -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Scene Video Assembly (FFmpeg)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def assemble_scene_video(
+    image_path: str,
+    audio_path: str,
+    srt_path: str,
+    scene_index: int,
+    session_id: str,
+    transition: str = "fade",
+    burn_subtitles: bool = True,
+) -> str:
     """
-    Assemble final video using FFmpeg.
-    Combines images, audio tracks, and subtitles into one MP4.
+    Combine image + audio into a scene MP4 using FFmpeg.
+    Optionally burns subtitles onto the video.
+    Returns path to the scene MP4.
     """
-    # Set dimensions based on format
-    if "9:16" in video_format or "Portrait" in video_format:
-        width, height = 1080, 1920
-    else:
-        width, height = 1920, 1080
-    
-    # Create a filter script for FFmpeg
-    filter_complex_parts = []
-    
-    for i, (img, audio) in enumerate(zip(image_paths, audio_paths)):
-        if not img:
-            continue
-        duration_str = "3"  # default
-        # Try to get duration from audio file
-        filter_complex_parts.append(
-            f"[{i}:v][{i}:a]concat=n=1:v=1:a=1[out{i}][outa{i}]"
-        )
-    
-    # Simple concatenation approach
-    # For each scene, we'll use FFmpeg to create a clip, then concatenate
-    
-    clips_dir = os.path.join(os.path.dirname(output_file), "clips")
-    os.makedirs(clips_dir, exist_ok=True)
-    
-    clip_list = []
-    for i, (img, audio) in enumerate(zip(image_paths, audio_paths)):
-        if not img:
-            continue
-        scene_num = i + 1
-        clip_file = os.path.join(clips_dir, f"clip_{scene_num}.mp4")
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", img,
-            "-i", audio,
-            "-c:v", "libx264",
-            "-tune", "stillimage",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-vf", f"scale={width}:{height}",
-            "-shortest",
-            clip_file
-        ]
-        
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            clip_list.append(clip_file)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            continue
-    
-    if not clip_list:
-        # No clips available - create a single black video
-        create_final_video(width, height, 30, None, subtitle_path, output_file)
-        return
-    
-    # Concatenate all clips
-    concat_file = os.path.join(clips_dir, "concat_list.txt")
-    with open(concat_file, "w") as f:
-        for clip in clip_list:
-            f.write(f"file '{clip}'\n")
-    
-    # Check if subtitle file exists and is not empty
-    has_subtitles = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
-    has_audio = len(clip_list) > 0
-    
-    # Create final video with or without subtitles
-    create_final_video(
-        width, height, 30, concat_file,
-        subtitle_path if has_subtitles else None,
-        output_file,
-        has_audio=has_audio
-    )
+    video_dir = os.path.join(EXPORTS_DIR, session_id, "scenes")
+    os.makedirs(video_dir, exist_ok=True)
+    output_path = os.path.join(video_dir, f"scene_{scene_index:03d}.mp4")
+
+    # Build FFmpeg command
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-i", audio_path,
+        "-c:v", "libx264",
+        "-tune", "stillimage",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+    ]
+
+    if burn_subtitles and srt_path and os.path.getsize(srt_path) > 0:
+        safe_srt = srt_path.replace("\\", "/").replace(":", "\\:")
+        cmd += ["-vf", f"subtitles='{safe_srt}':force_style='FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2'"]
+
+    cmd.append(output_path)
+
+    logger.info(f"[FFmpeg] Assembling scene {scene_index}: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        logger.error(f"[FFmpeg] Error on scene {scene_index}:\n{result.stderr}")
+        raise RuntimeError(f"FFmpeg failed for scene {scene_index}: {result.stderr[-300:]}")
+
+    logger.info(f"[Scene Video] Saved: {output_path}")
+    return output_path
 
 
-def create_final_video(
-    width: int, height: int, fps: int,
-    concat_list: str,
-    subtitle_path: str,
-    output_file: str,
-    has_audio: bool = True,
-) -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Final Video Concatenation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def concatenate_scenes(scene_paths: List[str], session_id: str, title: str = "output") -> str:
     """
-    Create the final output video.
+    Concatenate all scene MP4s into a single final video using FFmpeg concat demuxer.
+    Returns path to the final MP4.
     """
-    subtitle_filter = f"subtitles='{subtitle_path}'" if subtitle_path else ""
-    
-    if concat_list and os.path.exists(concat_list):
-        # Concatenate clips then add subtitles
-        temp_file = output_file.replace(".mp4", "_temp.mp4")
-        
-        concat_cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", concat_list,
-            "-c", "copy",
-            temp_file
-        ]
-        
-        try:
-            subprocess.run(concat_cmd, check=True, capture_output=True)
-        except:
-            return
-        
-        final_cmd = [
-            "ffmpeg", "-y",
-            "-i", temp_file,
-            "-vf", subtitle_filter if subtitle_path else "scale=1080:1920",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            output_file
-        ]
-    else:
-        # Create single clip with subtitles
-        final_cmd = [
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", f"color=c=navy:s={width}x{height}:r={fps}",
-            "-vf", subtitle_filter if subtitle_path else r"drawtext=text='Databloom Studio AI':fontsize=48:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2",
-            "-t", "30",
-            "-c:v", "libx264",
-            output_file
-        ]
-    
-    try:
-        subprocess.run(final_cmd, check=True, capture_output=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        # FFmpeg not available
-        pass
+    concat_list_path = os.path.join(EXPORTS_DIR, session_id, "concat_list.txt")
+    final_path = os.path.join(EXPORTS_DIR, session_id, f"{title.replace(' ', '_')}_final.mp4")
+
+    with open(concat_list_path, "w") as f:
+        for sp in scene_paths:
+            f.write(f"file '{sp}'\n")
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_list_path,
+        "-c", "copy",
+        final_path,
+    ]
+
+    logger.info(f"[FFmpeg] Concatenating {len(scene_paths)} scenes...")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        logger.error(f"[FFmpeg] Concat error:\n{result.stderr}")
+        raise RuntimeError(f"FFmpeg concat failed: {result.stderr[-300:]}")
+
+    logger.info(f"[Final Video] Saved: {final_path}")
+    return final_path
 
 
-def cleanup_session(session_dir: str) -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_video(
+    script: Dict[str, Any],
+    session_id: str = None,
+    voice: str = "Male",
+    language: str = "en",
+    burn_subtitles: bool = True,
+    transition: str = "fade",
+    progress_callback=None,
+) -> Dict[str, Any]:
     """
-    Clean up temporary files from a session.
-    Keeps only the final output.
+    Main entry point. Accepts a parsed script dict and produces a final MP4.
+
+    Args:
+        script:            Parsed script dict with keys: title, scenes[]
+        session_id:        Unique ID for this generation run
+        voice:             TTS voice preference (Male/Female — gTTS uses lang)
+        language:          TTS language code (default: 'en')
+        burn_subtitles:    Whether to burn SRT subtitles onto video
+        transition:        Transition style (currently: 'fade')
+        progress_callback: Optional callable(step: str, pct: int)
+
+    Returns:
+        dict with keys: success, video_path, session_id, scenes_count, errors[]
     """
-    import shutil
-    
-    files_to_keep = ["final_output.mp4"]
-    
-    for root, dirs, files in os.walk(session_dir):
-        for file in files:
-            if file not in files_to_keep:
-                try:
-                    os.remove(os.path.join(root, file))
-                except OSError:
-                    pass
-    
-    # Remove empty subdirectories
-    for root, dirs, files in os.walk(session_dir, topdown=False):
-        for d in dirs:
-            try:
-                os.rmdir(os.path.join(root, d))
-            except OSError:
-                pass
+    if session_id is None:
+        session_id = f"session_{int(time.time())}"
+
+    title  = script.get("title", "Databloom Video")
+    scenes = script.get("scenes", [])
+
+    if not scenes:
+        return {"success": False, "error": "No scenes found in script.", "session_id": session_id}
+
+    errors      = []
+    scene_paths = []
+    total       = len(scenes)
+
+    def _progress(step: str, pct: int):
+        logger
