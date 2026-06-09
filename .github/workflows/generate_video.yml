@@ -1,7 +1,5 @@
 name: Generate Databloom Video
 
-# Trigger manually from the GitHub Actions tab
-# You can pass inputs: topic, script, language, image_style, resolution
 on:
   workflow_dispatch:
     inputs:
@@ -40,105 +38,97 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
     steps:
-      # -------------------------------------------------------
-      # 1. Checkout code
-      # -------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -------------------------------------------------------
-      # 2. Set up Python
-      # -------------------------------------------------------
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      # -------------------------------------------------------
-      # 3. Install system dependencies (FFmpeg)
-      # -------------------------------------------------------
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg libsndfile1
 
-      # -------------------------------------------------------
-      # 4. Install Python dependencies
-      # -------------------------------------------------------
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # -------------------------------------------------------
-      # 5. Generate video via Python script
-      # -------------------------------------------------------
+      - name: Ensure backend package is importable
+        run: |
+          touch backend/__init__.py
+          touch backend/agents/__init__.py || true
+          echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
+          python -c "import sys; sys.path.insert(0, '.'); from backend.video_agent import generate_video; print('Import OK')"
+
       - name: Generate video
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python - <<'PYEOF'
-          import sys, os, json, textwrap
-          sys.path.insert(0, os.getcwd())
+import sys, os, textwrap
+sys.path.insert(0, os.getcwd())
+os.environ.setdefault('PYTHONPATH', os.getcwd())
 
-          topic        = """${{ github.event.inputs.topic }}"""
-          raw_script   = """${{ github.event.inputs.script }}"""
-          language     = "${{ github.event.inputs.language }}"
-          image_style  = "${{ github.event.inputs.image_style }}"
-          resolution_s = "${{ github.event.inputs.resolution }}"
-          fps          = int("${{ github.event.inputs.fps }}" or "30")
-          project_name = "${{ github.event.inputs.project_name }}"
+topic        = """${{ github.event.inputs.topic }}"""
+raw_script   = """${{ github.event.inputs.script }}"""
+language     = "${{ github.event.inputs.language }}"
+image_style  = "${{ github.event.inputs.image_style }}"
+resolution_s = "${{ github.event.inputs.resolution }}"
+fps          = int("${{ github.event.inputs.fps }}" or "30")
+project_name = "${{ github.event.inputs.project_name }}"
 
-          # Parse resolution
-          parts = resolution_s.split("x")
-          resolution = (int(parts[0]), int(parts[1])) if len(parts) == 2 else (1280, 720)
+parts = resolution_s.split("x")
+resolution = (int(parts[0]), int(parts[1])) if len(parts) == 2 else (1280, 720)
 
-          # Build script if not supplied
-          script = raw_script.strip()
-          if not script:
-              script = textwrap.dedent(f"""
-                  Introduction: What is {topic}?
+script = raw_script.strip()
+if not script:
+    script = textwrap.dedent(f"""
+        Introduction: What is {topic}?
 
-                  Key concepts and ideas about {topic}.
+        Key concepts and ideas about {topic}.
 
-                  Practical applications of {topic}.
+        Practical applications of {topic}.
 
-                  Summary and closing thoughts about {topic}.
-              """).strip()
+        Summary and closing thoughts about {topic}.
+    """).strip()
 
-          print(f"Topic      : {topic}")
-          print(f"Language   : {language}")
-          print(f"Style      : {image_style}")
-          print(f"Resolution : {resolution}")
-          print(f"FPS        : {fps}")
-          print(f"Project    : {project_name}")
-          print(f"Script len : {len(script)} chars")
+print(f"Topic      : {topic}")
+print(f"Language   : {language}")
+print(f"Style      : {image_style}")
+print(f"Resolution : {resolution}")
+print(f"FPS        : {fps}")
+print(f"Project    : {project_name}")
+print(f"Script len : {len(script)} chars")
 
-          from backend.video_agent import generate_video
+from backend.video_agent import generate_video
 
-          result = generate_video(
-              script=script,
-              output_dir="outputs",
-              project_name=project_name,
-              language=language,
-              image_style=image_style,
-              frame_rate=fps,
-              resolution=resolution,
-          )
+os.makedirs("outputs", exist_ok=True)
 
-          video_path = result.get("video_path") or result.get("output_path", "")
-          print(f"Video generated: {video_path}")
+result = generate_video(
+    script=script,
+    output_dir="outputs",
+    project_name=project_name,
+    language=language,
+    image_style=image_style,
+    frame_rate=fps,
+    resolution=resolution,
+)
 
-          # Write path to file for upload step
-          with open("video_output_path.txt", "w") as f:
-              f.write(video_path)
-          PYEOF
+video_path = result.get("video_path") or result.get("output_path", "")
+print(f"Video generated: {video_path}")
 
-      # -------------------------------------------------------
-      # 6. Upload generated video as artifact
-      # -------------------------------------------------------
+with open("video_output_path.txt", "w") as f:
+    f.write(video_path)
+PYEOF
+
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
         with:
@@ -146,3 +136,4 @@ jobs:
           path: outputs/
           retention-days: 7
           if-no-files-found: warn
+
